@@ -13,17 +13,15 @@ SLACK_WEBHOOK = os.getenv("SLACK_WEBHOOK")
 if not SLACK_WEBHOOK:
     raise ValueError("SLACK_WEBHOOK not set!")
 
-HADITH_API_KEY = os.getenv("HADITH_API_KEY")  # store your API key in env
-HADITH_API_URL = f"https://hadithapi.com/api/hadiths?apiKey={HADITH_API_KEY}&book=sahih-bukhari"
-
 CITY_LAT = 31.4313584
 CITY_LON = 74.2782463
 TZ = pytz.timezone("Asia/Karachi")
 
+# Tolerance window for reminder/exact time
 WINDOW_MINUTES = 5
-LAST_SENT = {}
-HADITH_COUNT = 0  # keeps track of last hadith sent
 
+# Keep track of sent reminders/prayers in memory (reset if function instance restarts)
+LAST_SENT = {}
 
 # -------------------------
 # HELPERS
@@ -31,7 +29,7 @@ HADITH_COUNT = 0  # keeps track of last hadith sent
 def send_slack_message(message):
     try:
         r = requests.post(SLACK_WEBHOOK, json={"text": message})
-        print(f"Sent: {message[:50]}..., Slack response: {r.status_code}")
+        print(f"Sent: {message}, Slack response: {r.status_code}")
         return True
     except Exception as e:
         print(f"Error sending Slack: {e}")
@@ -39,6 +37,7 @@ def send_slack_message(message):
 
 
 def is_within_range(now, target):
+    """Check if `now` is within WINDOW_MINUTES of target time"""
     return target <= now < (target + timedelta(minutes=WINDOW_MINUTES))
 
 
@@ -62,49 +61,6 @@ def get_prayer_times():
 
 
 # -------------------------
-# HADITH LOGIC
-# -------------------------
-def fetch_hadiths():
-    try:
-        data = requests.get(HADITH_API_URL).json()
-        return data["hadiths"]["data"]
-    except Exception as e:
-        print(f"Error fetching hadiths: {e}")
-        return []
-
-
-def get_hadith_index(hadith_list):
-    global HADITH_COUNT
-    index = HADITH_COUNT % len(hadith_list)
-    HADITH_COUNT += 1
-    return index
-
-
-def get_daily_hadith():
-    hadith_list = fetch_hadiths()
-    if not hadith_list:
-        return None
-    index = get_hadith_index(hadith_list)
-    return hadith_list[index]
-
-
-def send_hadith():
-    hadith = get_daily_hadith()
-    if not hadith:
-        return "No Hadith available"
-    message = (
-        f"🌙 *Daily Hadith Reminder* 🌙\n\n"
-        f"*Arabic:* {hadith['hadithArabic']}\n\n"
-        f"*English:* {hadith['hadithEnglish']}\n\n"
-        f"*Urdu:* {hadith.get('hadithUrdu', 'N/A')}\n\n"
-        f"— Narrated by: {hadith['englishNarrator']} / {hadith.get('urduNarrator', 'N/A')}\n\n"
-        f"📖 Source: Sahih Bukhari, Chapter: {hadith['headingEnglish']}"
-    )
-    send_slack_message(message)
-    return "Hadith sent"
-
-
-# -------------------------
 # HANDLER
 # -------------------------
 class handler(BaseHTTPRequestHandler):
@@ -125,19 +81,20 @@ class handler(BaseHTTPRequestHandler):
             send_slack_message(f"🕌 Test message from Vercel at {now.strftime('%I:%M %p')}")
             sent_messages.append("Test Slack message sent")
 
-            # Send a hadith for testing every minute
-            hadith_msg = send_hadith()
-            sent_messages.append(hadith_msg)
-
         # -------------------------
         # Prayer times logic
         # -------------------------
         timings = get_prayer_times()
         if timings:
+            # --- ZOHAR (fixed) ---
             zohar_time = now.replace(hour=13, minute=40)
+
+            # --- ASAR ---
             asar_api = datetime.strptime(timings.get("Asr", "17:00"), "%H:%M")
             asar_api = now.replace(hour=asar_api.hour, minute=asar_api.minute)
             asar_time = round_asar_time(asar_api) + timedelta(minutes=45)
+
+            # --- MAGHRIB ---
             maghrib_api = datetime.strptime(timings.get("Maghrib", "18:30"), "%H:%M")
             maghrib_time = now.replace(hour=maghrib_api.hour, minute=maghrib_api.minute) + timedelta(minutes=5)
 
@@ -152,25 +109,17 @@ class handler(BaseHTTPRequestHandler):
                 prayer_key = f"{name}-{today_str}-prayer"
                 reminder_key = f"{name}-{today_str}-reminder"
 
+                # REMINDER
                 if is_within_range(now, reminder_time) and not LAST_SENT.get(reminder_key):
                     if send_slack_message(f"⏰ 15 min left for {name} prayer"):
                         LAST_SENT[reminder_key] = True
                         sent_messages.append(f"{name} reminder sent")
 
+                # EXACT PRAYER
                 if is_within_range(now, prayer_time) and not LAST_SENT.get(prayer_key):
                     if send_slack_message(f"🕌 Time for {name} prayer!"):
                         LAST_SENT[prayer_key] = True
                         sent_messages.append(f"{name} prayer sent")
-
-        # -------------------------
-        # Daily Hadith at 10 AM
-        # -------------------------
-        hadith_key = f"hadith-{today_str}"
-        hadith_time = now.replace(hour=10, minute=0)
-        if is_within_range(now, hadith_time) and not LAST_SENT.get(hadith_key):
-            msg = send_hadith()
-            LAST_SENT[hadith_key] = True
-            sent_messages.append(msg)
 
         # -------------------------
         # Respond
