@@ -5,6 +5,14 @@ import requests
 from datetime import datetime
 import pytz
 
+from flask import Flask
+
+app = Flask(__name__)
+
+@app.route("/")
+def index():
+    return "Hello"
+
 SLACK_WEBHOOK = os.getenv("SLACK_WEBHOOK")
 if not SLACK_WEBHOOK:
     raise ValueError("SLACK_WEBHOOK not set!")
