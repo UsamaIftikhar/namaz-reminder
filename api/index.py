@@ -5,6 +5,7 @@ import requests
 from datetime import datetime, timedelta
 import pytz
 from urllib.parse import urlparse
+import json
 
 # -------------------------
 # CONFIG
@@ -22,8 +23,14 @@ TZ = pytz.timezone("Asia/Karachi")
 
 WINDOW_MINUTES = 5
 LAST_SENT = {}
-HADITH_COUNT = 0  # keeps track of last hadith sent
+HADITH_TRACK_FILE = "last_hadith.json"
 
+# Load persisted hadith tracking
+if os.path.exists(HADITH_TRACK_FILE):
+    with open(HADITH_TRACK_FILE, "r") as f:
+        HADITH_TRACK = json.load(f)
+else:
+    HADITH_TRACK = {}
 
 # -------------------------
 # HELPERS
@@ -73,10 +80,14 @@ def fetch_hadiths():
         return []
 
 
-def get_hadith_index(hadith_list):
-    global HADITH_COUNT
-    index = HADITH_COUNT % len(hadith_list)
-    HADITH_COUNT += 1
+def get_next_hadith_index(hadith_list):
+    today_str = datetime.now(TZ).strftime("%Y-%m-%d")
+    last_index = HADITH_TRACK.get(today_str, -1)
+    index = (last_index + 1) % len(hadith_list)
+    HADITH_TRACK[today_str] = index
+    # Persist to file
+    with open(HADITH_TRACK_FILE, "w") as f:
+        json.dump(HADITH_TRACK, f)
     return index
 
 
@@ -84,7 +95,7 @@ def get_daily_hadith():
     hadith_list = fetch_hadiths()
     if not hadith_list:
         return None
-    index = get_hadith_index(hadith_list)
+    index = get_next_hadith_index(hadith_list)
     return hadith_list[index]
 
 
