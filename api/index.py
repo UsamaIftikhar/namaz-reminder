@@ -27,9 +27,10 @@ def is_time_match(hour, minute):
     return abs(current_minutes - target_minutes) <= TOLERANCE
 
 def send_slack(message):
+    print(f"Testing slack called", SLACK_WEBHOOK, json={"text": message})
     r = requests.post(SLACK_WEBHOOK, json={"text": message})
-    print("✅ Sent" if r.status_code == 200 else f"❌ Failed ({r.status_code})")
-    return r.status_code, r.text  # for testing
+    print(f"SLACK response: {r.status_code}, {r.text}")
+    return r.status_code, r.text
 
 class handler(BaseHTTPRequestHandler):
     def do_GET(self):
