@@ -1,8 +1,10 @@
 import os
 import requests
-from datetime import datetime
+from datetime import datetime, timedelta
 import pytz
 from flask import Flask
+import threading
+import time
 
 # -------------------------
 # CONFIG
@@ -24,30 +26,46 @@ def send_slack_message(message):
         print(f"{datetime.now(TZ)} - Error sending Slack message: {e}")
 
 # -------------------------
-# MAIN LOGIC
+# TEST NAMAZ LOGIC
 # -------------------------
+LAST_SENT = set()
+
 def send_test_notifications():
     now = datetime.now(TZ).replace(second=0, microsecond=0)
-    
     prayers = ["Zohar", "Asar", "Maghrib"]
 
     for name in prayers:
+        reminder_key = f"{name}-reminder-{now.minute}"  # minute added to allow repeated messages for testing
+        prayer_key = f"{name}-prayer-{now.minute}"
+
         # REMINDER
-        send_slack_message(f"⏰ 15 min left for {name} prayer (TEST CONTINUOUS)")
+        if reminder_key not in LAST_SENT:
+            send_slack_message(f"⏰ 15 min left for {name} prayer (TEST)")
+            LAST_SENT.add(reminder_key)
 
-        # EXACT
-        send_slack_message(f"🕌 Time for {name} prayer! (TEST CONTINUOUS)")
+        # EXACT TIME
+        if prayer_key not in LAST_SENT:
+            send_slack_message(f"🕌 Time for {name} prayer! (TEST)")
+            LAST_SENT.add(prayer_key)
 
-    print(f"{datetime.now(TZ)} - Cron ran successfully.")
+    print(f"{datetime.now(TZ)} - Test notifications sent.")
 
 # -------------------------
-# FLASK APP TO KEEP SERVICE ALIVE
+# BACKGROUND THREAD TO RUN EVERY 1 MINUTE FOR TESTING
+# -------------------------
+def background_test_checker():
+    while True:
+        send_test_notifications()
+        time.sleep(60)  # check every 1 minute for testing
+
+# -------------------------
+# FLASK WEB SERVICE
 # -------------------------
 app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return "Namaz Reminder Service is alive!", 200
+    return "Namaz Reminder Test Service is alive!", 200
 
 @app.route("/run-cron")
 def run_cron():
@@ -58,5 +76,6 @@ def run_cron():
 # ENTRY POINT
 # -------------------------
 if __name__ == "__main__":
-    # Run Flask web server to keep service alive
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
+    threading.Thread(target=background_test_checker, daemon=True).start()
+    port = int(os.getenv("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
