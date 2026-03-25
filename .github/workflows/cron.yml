@@ -3,7 +3,6 @@ name: Test Slack Notifications
 on:
   schedule:
     - cron: "*/1 * * * *"  # every minute for testing
-  workflow_dispatch:        # allows manual run too
 
 jobs:
   test-slack:
