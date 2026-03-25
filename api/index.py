@@ -27,9 +27,9 @@ def is_time_match(hour, minute):
     return abs(current_minutes - target_minutes) <= TOLERANCE
 
 def send_slack(message):
-    print(f"Testing slack called", SLACK_WEBHOOK, json={"text": message})
+    print(f"Sending Slack message: {message}")
     r = requests.post(SLACK_WEBHOOK, json={"text": message})
-    print(f"SLACK response: {r.status_code}, {r.text}")
+    print(f"Slack response: {r.status_code}, {r.text}")
     return r.status_code, r.text
 
 class handler(BaseHTTPRequestHandler):
@@ -49,7 +49,7 @@ class handler(BaseHTTPRequestHandler):
 
         # Test endpoint: /test-slack
         if path == "/test-slack":
-            status, text = send_slack(f"Test message from Vercel at {now.strftime('%I:%M %p')}")
+            status, text = send_slack(f"🕌 Test message from Vercel at {now.strftime('%I:%M %p')}")
             sent_prayers.append("Test Slack message sent")
 
         # Respond
@@ -61,7 +61,6 @@ class handler(BaseHTTPRequestHandler):
         else:
             self.wfile.write(b"No match")
         return
-
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
