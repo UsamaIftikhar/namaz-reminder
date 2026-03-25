@@ -7,7 +7,7 @@ import pytz
 
 SLACK_WEBHOOK = os.getenv("SLACK_WEBHOOK")
 if not SLACK_WEBHOOK:
-    raise ValueError("SLACK_WEBHOOK secret is not set!")
+    raise ValueError("SLACK_WEBHOOK not set!")
 
 TZ = pytz.timezone("Asia/Karachi")
 
@@ -19,7 +19,7 @@ PRAYER_TIMES = {
 
 TOLERANCE = 2  # minutes
 
-# Store last sent in memory (resets per function cold start)
+# Memory to prevent duplicates during cold starts
 LAST_SENT = {}
 
 def is_time_match(target_hour, target_minute):
@@ -28,26 +28,27 @@ def is_time_match(target_hour, target_minute):
     target_minutes = target_hour * 60 + target_minute
     return abs(current_minutes - target_minutes) <= TOLERANCE
 
-def send_slack_message(message: str):
+def send_slack(message):
     response = requests.post(SLACK_WEBHOOK, json={"text": message})
     if response.status_code == 200:
         print(f"✅ Sent: {message}")
     else:
         print(f"❌ Failed ({response.status_code}): {response.text}")
 
+# This is the Vercel entrypoint
 def handler(request):
     now = datetime.now(TZ)
     today = now.strftime("%Y-%m-%d")
-    messages_sent = []
+    sent_prayers = []
 
-    for prayer, (hour, minute) in PRAYER_TIMES.items():
+    for prayer, (h, m) in PRAYER_TIMES.items():
         key = f"{prayer}_{today}"
-        if is_time_match(hour, minute) and not LAST_SENT.get(key):
+        if is_time_match(h, m) and not LAST_SENT.get(key):
             msg = f":mosque: {prayer} time! ({now.strftime('%I:%M %p')})"
-            send_slack_message(msg)
+            send_slack(msg)
             LAST_SENT[key] = True
-            messages_sent.append(prayer)
+            sent_prayers.append(prayer)
 
-    if messages_sent:
-        return {"status": "sent", "prayers": messages_sent}
+    if sent_prayers:
+        return {"status": "sent", "prayers": sent_prayers}
     return {"status": "no match"}
