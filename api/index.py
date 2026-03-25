@@ -29,13 +29,16 @@ def is_time_match(hour, minute):
 def send_slack(message):
     r = requests.post(SLACK_WEBHOOK, json={"text": message})
     print("✅ Sent" if r.status_code == 200 else f"❌ Failed ({r.status_code})")
+    return r.status_code, r.text  # for testing
 
 class handler(BaseHTTPRequestHandler):
     def do_GET(self):
+        path = self.path
         now = datetime.now(TZ)
         today = now.strftime("%Y-%m-%d")
         sent_prayers = []
 
+        # Regular prayer check
         for prayer, (h, m) in PRAYER_TIMES.items():
             key = f"{prayer}_{today}"
             if is_time_match(h, m) and not LAST_SENT.get(key):
@@ -43,11 +46,17 @@ class handler(BaseHTTPRequestHandler):
                 LAST_SENT[key] = True
                 sent_prayers.append(prayer)
 
+        # Test endpoint: /test-slack
+        if path == "/test-slack":
+            status, text = send_slack(f"Test message from Vercel at {now.strftime('%I:%M %p')}")
+            sent_prayers.append("Test Slack message sent")
+
+        # Respond
         self.send_response(200)
         self.send_header('Content-type','text/plain')
         self.end_headers()
         if sent_prayers:
-            self.wfile.write(f"Sent prayers: {', '.join(sent_prayers)}".encode('utf-8'))
+            self.wfile.write(f"Sent: {', '.join(sent_prayers)}".encode('utf-8'))
         else:
             self.wfile.write(b"No match")
         return
