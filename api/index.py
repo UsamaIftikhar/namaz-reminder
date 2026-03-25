@@ -49,6 +49,7 @@ class handler(BaseHTTPRequestHandler):
 
         # Test endpoint: /test-slack
         if path == "/test-slack":
+            print(f"test slack calling")
             status, text = send_slack(f"🕌 Test message from Vercel at {now.strftime('%I:%M %p')}")
             sent_prayers.append("Test Slack message sent")
 
