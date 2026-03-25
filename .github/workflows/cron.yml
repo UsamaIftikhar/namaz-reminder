@@ -2,13 +2,12 @@ name: Test Slack Notifications
 
 on:
   schedule:
-    - cron: "*/1 * * * *"  # every minute
-  workflow_dispatch:
+    - cron: "*/1 * * * *"  # every minute for testing
+  workflow_dispatch:        # allows manual run too
 
 jobs:
   test-slack:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout repo
         uses: actions/checkout@v3
@@ -21,7 +20,7 @@ jobs:
       - name: Install dependencies
         run: pip install requests pytz
 
-      - name: Run test script
+      - name: Run main.py
         env:
           SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
         run: python main.py
