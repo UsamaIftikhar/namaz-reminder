@@ -92,14 +92,16 @@ def send_hadith():
     hadith = get_daily_hadith()
     if not hadith:
         return "No Hadith available"
+
     message = (
-        f"🌙 *Daily Hadith Reminder* 🌙\n\n"
-        f"*Arabic:* {hadith['hadithArabic']}\n\n"
-        f"*English:* {hadith['hadithEnglish']}\n\n"
-        f"*Urdu:* {hadith.get('hadithUrdu', 'N/A')}\n\n"
+        ":crescent_moon: *Daily Hadith Reminder* :crescent_moon:\n\n"
+        f"*Arabic:* \n{hadith['hadithArabic']}\n\n"
+        f"*English:* \n{hadith['hadithEnglish']}\n\n"
+        f"*Urdu:* \n{hadith.get('hadithUrdu', 'N/A')}\n\n"
         f"— Narrated by: {hadith['englishNarrator']} / {hadith.get('urduNarrator', 'N/A')}\n\n"
-        f"📖 Source: Sahih Bukhari, Chapter: {hadith['headingEnglish']}"
+        f":book: Source: Sahih Bukhari, Chapter: {hadith['headingEnglish']}"
     )
+
     send_slack_message(message)
     return "Hadith sent"
 
