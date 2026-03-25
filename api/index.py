@@ -1,10 +1,10 @@
-# api/send_prayer.py
+# api/namaz_server.py
 import os
 import requests
 from datetime import datetime
 import pytz
 
-SLACK_WEBHOOK = os.environ.get("SLACK_WEBHOOK")
+SLACK_WEBHOOK = os.getenv("SLACK_WEBHOOK")
 if not SLACK_WEBHOOK:
     raise ValueError("SLACK_WEBHOOK not set!")
 
@@ -17,7 +17,7 @@ PRAYER_TIMES = {
 }
 
 TOLERANCE = 2  # minutes
-LAST_SENT = {}
+LAST_SENT = {}  # keeps track of today's prayers already sent
 
 def is_time_match(hour, minute):
     now = datetime.now(TZ)
@@ -27,9 +27,14 @@ def is_time_match(hour, minute):
 
 def send_slack(message):
     r = requests.post(SLACK_WEBHOOK, json={"text": message})
+    print("✅ Sent" if r.status_code == 200 else f"❌ Failed ({r.status_code})")
     return r.status_code, r.text
 
+# ------------------------------
+# This is the Vercel serverless "handler" function
+# ------------------------------
 def handler(request):
+    """Main API function for /api/namaz_server"""
     now = datetime.now(TZ)
     today = now.strftime("%Y-%m-%d")
     sent_prayers = []
@@ -41,7 +46,18 @@ def handler(request):
             LAST_SENT[key] = True
             sent_prayers.append(prayer)
 
+    response_text = f"Sent prayers: {', '.join(sent_prayers)}" if sent_prayers else "No match"
     return {
         "statusCode": 200,
-        "body": f"Sent prayers: {', '.join(sent_prayers)}" if sent_prayers else "No match"
+        "body": response_text
+    }
+
+# ------------------------------
+# Optional test route for Slack
+# ------------------------------
+def test_slack(request):
+    status, text = send_slack("Test message from Vercel!")
+    return {
+        "statusCode": 200,
+        "body": f"Sent: {status}, {text}"
     }
