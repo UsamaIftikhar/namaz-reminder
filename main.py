@@ -56,7 +56,7 @@ def send_test_notifications():
 def background_test_checker():
     while True:
         send_test_notifications()
-        time.sleep(60)  # check every 1 minute for testing
+        time.sleep(300)  # check every 1 minute for testing
 
 # -------------------------
 # FLASK WEB SERVICE
