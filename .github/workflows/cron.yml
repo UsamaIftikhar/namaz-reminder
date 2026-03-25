@@ -1,12 +1,12 @@
-name: Namaz Slack Notifications
+name: Test Slack Notifications
 
 on:
   schedule:
-    - cron: "*/1 * * * *" # run every 5 minutes
+    - cron: "*/1 * * * *"  # every minute
   workflow_dispatch:
 
 jobs:
-  send-slack:
+  test-slack:
     runs-on: ubuntu-latest
 
     steps:
@@ -19,9 +19,9 @@ jobs:
           python-version: "3.10"
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: pip install requests pytz
 
-      - name: Run prayer script
+      - name: Run test script
         env:
           SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
-        run: python prayer_slack.py
+        run: python main.py
