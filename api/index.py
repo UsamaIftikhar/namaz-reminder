@@ -98,7 +98,7 @@ def send_hadith():
         f"*Arabic:* \n{hadith['hadithArabic']}\n\n"
         f"*English:* \n{hadith['hadithEnglish']}\n\n"
         f"*Urdu:* \n{hadith.get('hadithUrdu', 'N/A')}\n\n"
-        f"— Narrated by: {hadith['englishNarrator']} / {hadith.get('urduNarrator', 'N/A')}\n\n"
+        f"— Narrated by: {hadith['englishNarrator']} \n {hadith.get('urduNarrator', 'N/A')}\n\n"
         f":book: Source: Sahih Bukhari, Chapter: {hadith['headingEnglish']}"
     )
 
