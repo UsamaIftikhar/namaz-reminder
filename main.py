@@ -9,6 +9,7 @@ CITY_LAT = 31.4313584
 CITY_LON = 74.2782463
 
 TZ = pytz.timezone("Asia/Karachi")
+now = datetime.now(TZ).replace(second=0, microsecond=0)
 
 LAST_SENT_FILE = "last_sent.txt"
 
@@ -83,9 +84,9 @@ def main():
     maghrib_time = maghrib_api + timedelta(minutes=5)
 
     prayers = {
-        "Zohar": zohar_time,
-        "Asar": asar_time,
-        "Maghrib": maghrib_time
+        "Zohar": now,
+        "Asar": now,
+        "Maghrib": now
     }
 
     for name, prayer_time in prayers.items():
