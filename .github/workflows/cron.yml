@@ -1,4 +1,4 @@
-name: Test Slack Notifications
+name: Notifications
 
 on:
   schedule:
