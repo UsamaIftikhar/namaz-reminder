@@ -84,9 +84,9 @@ def main():
     maghrib_time = maghrib_api + timedelta(minutes=5)
 
     prayers = {
-        "Zohar": now,
-        "Asar": now,
-        "Maghrib": now
+        "Zohar": zohar_time,
+        "Asar": asar_time,
+        "Maghrib": maghrib_time
     }
 
     for name, prayer_time in prayers.items():
