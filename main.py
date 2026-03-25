@@ -6,8 +6,8 @@ from datetime import datetime
 
 SLACK_WEBHOOK = os.getenv("SLACK_WEBHOOK")  # <-- will set this in Railway
 
-CITY_LAT = 51.5194682
-CITY_LON = -0.1360365
+CITY_LAT = 31.4313584
+CITY_LON = 74.2782463
 PRAYERS = ["Fajr", "Dhuhr", "Asr", "Maghrib", "Isha"]
 
 def get_prayer_times():
