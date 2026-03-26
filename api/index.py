@@ -132,23 +132,11 @@ def format_hadith_message(hadith):
 
     return (
         f":crescent_moon: *Daily Hadith Reminder* :crescent_moon:\n\n"
-
-        f"━━━━━━━━━━━━━━━\n"
-        f"*Arabic*\n{arabic}\n\n"
-
-        f"━━━━━━━━━━━━━━━\n"
-        f"*English*\n{english}\n\n"
-
-        f"━━━━━━━━━━━━━━━\n"
-        f"*Urdu*\n{urdu}\n\n"
-
-        f"━━━━━━━━━━━━━━━\n"
-        f"*Narrator*\n{eng_narrator}\n{urdu_narrator}\n\n"
-
-        f":book: *Reference*\n"
-        f"Sahih Bukhari\n"
-        f"Hadith #: {hadith_number}\n"
-        f"Chapter: {chapter}"
+        f"*Arabic:*\n{arabic}\n\n"
+        f"*English:*\n{english}\n\n"
+        f"*Urdu:*\n{urdu}\n\n"
+        f"— Narrated by: {eng_narrator} / {urdu_narrator}\n\n"
+        f":book: Source: Sahih Bukhari, Hadith Number: {hadith_number}, Chapter: {chapter}"
     )
 
 def send_hadith():
