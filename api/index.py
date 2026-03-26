@@ -4,8 +4,8 @@ import requests
 from datetime import datetime, timedelta, date
 import pytz
 from urllib.parse import urlparse
+from supabase import create_client
 import json
-import psycopg2
 
 # -------------------------
 # CONFIG
@@ -15,9 +15,6 @@ if not SLACK_WEBHOOK:
     raise ValueError("SLACK_WEBHOOK not set!")
 
 HADITH_API_KEY = os.getenv("HADITH_API_KEY")
-if not HADITH_API_KEY:
-    raise ValueError("HADITH_API_KEY not set!")
-
 HADITH_API_URL = f"https://hadithapi.com/api/hadiths?apiKey={HADITH_API_KEY}&book=sahih-bukhari"
 
 CITY_LAT = 31.4313584
@@ -28,25 +25,15 @@ WINDOW_MINUTES = 5
 LAST_SENT = {}
 
 # -------------------------
-# SUPABASE/POSTGRES CONFIG
+# SUPABASE CLIENT
 # -------------------------
-SUPABASE_HOST = os.getenv("SUPABASE_HOST")
-SUPABASE_DB = os.getenv("SUPABASE_DB")
-SUPABASE_USER = os.getenv("SUPABASE_USER")
-SUPABASE_PASS = os.getenv("SUPABASE_PG_PASS")
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
-if not all([SUPABASE_HOST, SUPABASE_DB, SUPABASE_USER, SUPABASE_PASS]):
-    raise ValueError("Supabase/Postgres environment variables not fully set!")
+if not SUPABASE_URL or not SUPABASE_KEY:
+    raise ValueError("SUPABASE_URL or SUPABASE_KEY not set!")
 
-def get_db_conn():
-    return psycopg2.connect(
-        host=SUPABASE_HOST,
-        dbname=SUPABASE_DB,
-        user=SUPABASE_USER,
-        password=SUPABASE_PASS,
-        port=5432,
-        sslmode='require'
-    )
+supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # -------------------------
 # HELPERS
@@ -92,23 +79,19 @@ def fetch_hadiths():
         return []
 
 def get_next_hadith_index(hadith_list):
-    today = datetime.now(TZ).date()
-    with get_db_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute("SELECT hadith_index FROM daily_hadith_track WHERE track_date = %s", (today,))
-            row = cur.fetchone()
-            if row:
-                index = row[0]
-            else:
-                cur.execute("SELECT hadith_index FROM daily_hadith_track ORDER BY track_date DESC LIMIT 1")
-                last_row = cur.fetchone()
-                last_index = last_row[0] if last_row else -1
-                index = (last_index + 1) % len(hadith_list)
-                cur.execute(
-                    "INSERT INTO daily_hadith_track (track_date, hadith_index) VALUES (%s, %s)",
-                    (today, index)
-                )
-                conn.commit()
+    today = date.today().isoformat()
+
+    # Check if today's entry exists
+    res = supabase.table("daily_hadith_track").select("hadith_index").eq("track_date", today).execute()
+    if res.data and len(res.data) > 0:
+        index = res.data[0]["hadith_index"]
+    else:
+        # Get last index
+        res_last = supabase.table("daily_hadith_track").select("hadith_index").order("track_date", desc=True).limit(1).execute()
+        last_index = res_last.data[0]["hadith_index"] if res_last.data else -1
+        index = (last_index + 1) % len(hadith_list)
+        # Insert today's index
+        supabase.table("daily_hadith_track").insert({"track_date": today, "hadith_index": index}).execute()
     return index
 
 def get_daily_hadith():
@@ -118,7 +101,7 @@ def get_daily_hadith():
     index = get_next_hadith_index(hadith_list)
     return hadith_list[index]
 
-def send_hadith(test=False):
+def send_hadith():
     hadith = get_daily_hadith()
     if not hadith:
         return "No Hadith available"
@@ -134,19 +117,6 @@ def send_hadith(test=False):
     )
 
     send_slack_message(message)
-
-    # Insert/update in Supabase even for test
-    today = datetime.now(TZ).date()
-    hadith_number = hadith.get("hadithNumber", -1)
-    with get_db_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute("""
-                INSERT INTO daily_hadith_track (track_date, hadith_index)
-                VALUES (%s, %s)
-                ON CONFLICT (track_date) DO UPDATE SET hadith_index = EXCLUDED.hadith_index
-            """, (today, hadith_number))
-            conn.commit()
-
     return "Hadith sent"
 
 # -------------------------
@@ -161,11 +131,11 @@ class handler(BaseHTTPRequestHandler):
         parsed_path = urlparse(self.path).path
         print(f"[{now.strftime('%Y-%m-%d %H:%M:%S')}] Incoming request path: {self.path}")
 
-        # Test Slack
+        # Test Slack + insert hadith
         if parsed_path.endswith("/test-slack"):
             send_slack_message(f"🕌 Test message at {now.strftime('%I:%M %p')}")
             sent_messages.append("Test Slack message sent")
-            msg = send_hadith(test=True)
+            msg = send_hadith()
             sent_messages.append(msg)
 
         # Prayer times
