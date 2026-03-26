@@ -24,12 +24,13 @@ TZ = pytz.timezone("Asia/Karachi")
 WINDOW_MINUTES = 5
 LAST_SENT = {}
 
+SLACK_MAX_LENGTH = 38000  # safe buffer below Slack limit
+
 # -------------------------
 # SUPABASE CLIENT
 # -------------------------
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
-
 if not SUPABASE_URL or not SUPABASE_KEY:
     raise ValueError("SUPABASE_URL or SUPABASE_KEY not set!")
 
@@ -83,17 +84,16 @@ def get_next_hadith_index(hadith_list):
 
     # Check if today's entry exists
     res = supabase.table("daily_hadith_track").select("hadith_index").eq("track_date", today).execute()
-    
     if res.data and len(res.data) > 0:
-        # Record exists → increment index
-        current_index = res.data[0]["hadith_index"]
-        next_index = (current_index + 1) % len(hadith_list)
-        supabase.table("daily_hadith_track").update({"hadith_index": next_index}).eq("track_date", today).execute()
-        return next_index
+        index = res.data[0]["hadith_index"]
     else:
-        # No record today → insert first Hadith
-        supabase.table("daily_hadith_track").insert({"track_date": today, "hadith_index": 0}).execute()
-        return 0
+        # Get last index
+        res_last = supabase.table("daily_hadith_track").select("hadith_index").order("track_date", desc=True).limit(1).execute()
+        last_index = res_last.data[0]["hadith_index"] if res_last.data else -1
+        index = (last_index + 1) % len(hadith_list)
+        # Insert today's index
+        supabase.table("daily_hadith_track").insert({"track_date": today, "hadith_index": index}).execute()
+    return index
 
 def get_daily_hadith():
     hadith_list = fetch_hadiths()
@@ -107,16 +107,30 @@ def send_hadith():
     if not hadith:
         return "No Hadith available"
 
-    message = (
+    base_message = (
         f":crescent_moon: *Daily Hadith Reminder* :crescent_moon:\n\n"
         f"*Arabic:* \n{hadith['hadithArabic']}\n\n"
         f"*English:* \n{hadith['hadithEnglish']}\n\n"
         f"*Urdu:* \n{hadith.get('hadithUrdu', 'N/A')}\n\n"
         f"— Narrated by: {hadith['englishNarrator']} \n {hadith.get('urduNarrator', 'N/A')}\n\n"
-        f":book: Source: Sahih Bukhari, Hadith Number: {hadith.get('hadithNumber', 'N/A')} Chapter: {hadith['headingEnglish']}"
+        f":book: Source: Sahih Bukhari, Hadith Number: {hadith.get('hadithNumber', 'N/A')}, Chapter: {hadith['headingEnglish']}"
     )
 
-    send_slack_message(message)
+    # Handle long messages
+    if len(base_message) > SLACK_MAX_LENGTH:
+        lines = base_message.split("\n")
+        chunk = ""
+        for line in lines:
+            if len(chunk) + len(line) + 1 > SLACK_MAX_LENGTH:
+                send_slack_message(chunk)
+                chunk = line + "\n"
+            else:
+                chunk += line + "\n"
+        if chunk:
+            send_slack_message(chunk)
+    else:
+        send_slack_message(base_message)
+
     return "Hadith sent"
 
 # -------------------------
