@@ -113,7 +113,7 @@ def send_hadith():
         f"*English:* \n{hadith['hadithEnglish']}\n\n"
         f"*Urdu:* \n{hadith.get('hadithUrdu', 'N/A')}\n\n"
         f"— Narrated by: {hadith['englishNarrator']} \n {hadith.get('urduNarrator', 'N/A')}\n\n"
-        f":book: Source: Sahih Bukhari, Hadith Number:* {hadith.get('hadithNumber', 'N/A')} Chapter: {hadith['headingEnglish']}"
+        f":book: Source: Sahih Bukhari, Hadith Number: {hadith.get('hadithNumber', 'N/A')} Chapter: {hadith['headingEnglish']}"
     )
 
     send_slack_message(message)
