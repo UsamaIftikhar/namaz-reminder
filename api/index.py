@@ -1,10 +1,11 @@
-# api/namaz_server.py
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import os
 import requests
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 import pytz
 from urllib.parse import urlparse
+import json
+import psycopg2
 
 # -------------------------
 # CONFIG
@@ -13,7 +14,10 @@ SLACK_WEBHOOK = os.getenv("SLACK_WEBHOOK")
 if not SLACK_WEBHOOK:
     raise ValueError("SLACK_WEBHOOK not set!")
 
-HADITH_API_KEY = os.getenv("HADITH_API_KEY")  # store your API key in env
+HADITH_API_KEY = os.getenv("HADITH_API_KEY")
+if not HADITH_API_KEY:
+    raise ValueError("HADITH_API_KEY not set!")
+
 HADITH_API_URL = f"https://hadithapi.com/api/hadiths?apiKey={HADITH_API_KEY}&book=sahih-bukhari"
 
 CITY_LAT = 31.4313584
@@ -22,8 +26,27 @@ TZ = pytz.timezone("Asia/Karachi")
 
 WINDOW_MINUTES = 5
 LAST_SENT = {}
-HADITH_COUNT = 0  # keeps track of last hadith sent
 
+# -------------------------
+# SUPABASE/POSTGRES CONFIG
+# -------------------------
+SUPABASE_HOST = os.getenv("SUPABASE_HOST")
+SUPABASE_DB = os.getenv("SUPABASE_DB")
+SUPABASE_USER = os.getenv("SUPABASE_USER")
+SUPABASE_PASS = os.getenv("SUPABASE_PG_PASS")
+
+if not all([SUPABASE_HOST, SUPABASE_DB, SUPABASE_USER, SUPABASE_PASS]):
+    raise ValueError("Supabase/Postgres environment variables not fully set!")
+
+def get_db_conn():
+    return psycopg2.connect(
+        host=SUPABASE_HOST,
+        dbname=SUPABASE_DB,
+        user=SUPABASE_USER,
+        password=SUPABASE_PASS,
+        port=5432,
+        sslmode='require'
+    )
 
 # -------------------------
 # HELPERS
@@ -37,10 +60,8 @@ def send_slack_message(message):
         print(f"Error sending Slack: {e}")
         return False
 
-
 def is_within_range(now, target):
     return target <= now < (target + timedelta(minutes=WINDOW_MINUTES))
-
 
 def round_asar_time(dt):
     minute = dt.minute
@@ -48,7 +69,6 @@ def round_asar_time(dt):
         return dt.replace(minute=30, second=0, microsecond=0)
     else:
         return dt.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
-
 
 def get_prayer_times():
     today = datetime.utcnow().strftime("%d-%m-%Y")
@@ -59,7 +79,6 @@ def get_prayer_times():
     except Exception as e:
         print(f"Error fetching prayer times: {e}")
         return {}
-
 
 # -------------------------
 # HADITH LOGIC
@@ -72,29 +91,41 @@ def fetch_hadiths():
         print(f"Error fetching hadiths: {e}")
         return []
 
-
-def get_hadith_index(hadith_list):
-    global HADITH_COUNT
-    index = HADITH_COUNT % len(hadith_list)
-    HADITH_COUNT += 1
+def get_next_hadith_index(hadith_list):
+    today = datetime.now(TZ).date()
+    with get_db_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT hadith_index FROM daily_hadith_track WHERE track_date = %s", (today,))
+            row = cur.fetchone()
+            if row:
+                index = row[0]
+            else:
+                cur.execute("SELECT hadith_index FROM daily_hadith_track ORDER BY track_date DESC LIMIT 1")
+                last_row = cur.fetchone()
+                last_index = last_row[0] if last_row else -1
+                index = (last_index + 1) % len(hadith_list)
+                cur.execute(
+                    "INSERT INTO daily_hadith_track (track_date, hadith_index) VALUES (%s, %s)",
+                    (today, index)
+                )
+                conn.commit()
     return index
-
 
 def get_daily_hadith():
     hadith_list = fetch_hadiths()
     if not hadith_list:
         return None
-    index = get_hadith_index(hadith_list)
+    index = get_next_hadith_index(hadith_list)
     return hadith_list[index]
 
-
-def send_hadith():
+def send_hadith(test=False):
     hadith = get_daily_hadith()
     if not hadith:
         return "No Hadith available"
 
     message = (
-        ":crescent_moon: *Daily Hadith Reminder* :crescent_moon:\n\n"
+        f":crescent_moon: *Daily Hadith Reminder* :crescent_moon:\n\n"
+        f"*Hadith Number:* {hadith.get('hadithNumber', 'N/A')}\n"
         f"*Arabic:* \n{hadith['hadithArabic']}\n\n"
         f"*English:* \n{hadith['hadithEnglish']}\n\n"
         f"*Urdu:* \n{hadith.get('hadithUrdu', 'N/A')}\n\n"
@@ -103,8 +134,20 @@ def send_hadith():
     )
 
     send_slack_message(message)
-    return "Hadith sent"
 
+    # Insert/update in Supabase even for test
+    today = datetime.now(TZ).date()
+    hadith_number = hadith.get("hadithNumber", -1)
+    with get_db_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO daily_hadith_track (track_date, hadith_index)
+                VALUES (%s, %s)
+                ON CONFLICT (track_date) DO UPDATE SET hadith_index = EXCLUDED.hadith_index
+            """, (today, hadith_number))
+            conn.commit()
+
+    return "Hadith sent"
 
 # -------------------------
 # HANDLER
@@ -115,39 +158,27 @@ class handler(BaseHTTPRequestHandler):
         today_str = now.strftime("%Y-%m-%d")
         sent_messages = []
 
-        # Debug log incoming path
-        print(f"[{now.strftime('%Y-%m-%d %H:%M:%S')}] Incoming request path: {self.path}")
         parsed_path = urlparse(self.path).path
+        print(f"[{now.strftime('%Y-%m-%d %H:%M:%S')}] Incoming request path: {self.path}")
 
-        # -------------------------
-        # Test Slack endpoint
-        # -------------------------
+        # Test Slack
         if parsed_path.endswith("/test-slack"):
-            print("Test Slack endpoint called")
-            send_slack_message(f"🕌 Test message from Vercel at {now.strftime('%I:%M %p')}")
+            send_slack_message(f"🕌 Test message at {now.strftime('%I:%M %p')}")
             sent_messages.append("Test Slack message sent")
+            msg = send_hadith(test=True)
+            sent_messages.append(msg)
 
-            # Send a hadith for testing every minute
-            hadith_msg = send_hadith()
-            sent_messages.append(hadith_msg)
-
-        # -------------------------
-        # Prayer times logic
-        # -------------------------
+        # Prayer times
         timings = get_prayer_times()
         if timings:
             zohar_time = now.replace(hour=13, minute=40)
-            asar_api = datetime.strptime(timings.get("Asr", "17:00"), "%H:%M")
-            asar_api = now.replace(hour=asar_api.hour, minute=asar_api.minute)
-            asar_time = round_asar_time(asar_api) + timedelta(minutes=45)
+            asr_api = datetime.strptime(timings.get("Asr", "17:00"), "%H:%M")
+            asar_time = now.replace(hour=asr_api.hour, minute=asr_api.minute)
+            asar_time = round_asar_time(asar_time) + timedelta(minutes=45)
             maghrib_api = datetime.strptime(timings.get("Maghrib", "18:30"), "%H:%M")
             maghrib_time = now.replace(hour=maghrib_api.hour, minute=maghrib_api.minute) + timedelta(minutes=5)
 
-            prayers = {
-                "Zohar": zohar_time,
-                "Asar": asar_time,
-                "Maghrib": maghrib_time
-            }
+            prayers = {"Zohar": zohar_time, "Asar": asar_time, "Maghrib": maghrib_time}
 
             for name, prayer_time in prayers.items():
                 reminder_time = prayer_time - timedelta(minutes=15)
@@ -164,9 +195,7 @@ class handler(BaseHTTPRequestHandler):
                         LAST_SENT[prayer_key] = True
                         sent_messages.append(f"{name} prayer sent")
 
-        # -------------------------
         # Daily Hadith at 10 AM
-        # -------------------------
         hadith_key = f"hadith-{today_str}"
         hadith_time = now.replace(hour=10, minute=0)
         if is_within_range(now, hadith_time) and not LAST_SENT.get(hadith_key):
@@ -174,19 +203,13 @@ class handler(BaseHTTPRequestHandler):
             LAST_SENT[hadith_key] = True
             sent_messages.append(msg)
 
-        # -------------------------
-        # Respond
-        # -------------------------
+        # Response
         self.send_response(200)
         self.send_header("Content-type", "text/plain")
         self.end_headers()
-        if sent_messages:
-            response_text = f"Sent: {', '.join(sent_messages)}"
-        else:
-            response_text = "No match"
+        response_text = f"Sent: {', '.join(sent_messages)}" if sent_messages else "No match"
         print(f"Response: {response_text}")
         self.wfile.write(response_text.encode("utf-8"))
-
 
 # -------------------------
 # SERVER ENTRY
