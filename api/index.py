@@ -40,10 +40,10 @@ supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 # HELPERS
 # -------------------------
 def send_slack_message(message):
-    """Send message to Slack."""
+    """Send message to Slack if within limit."""
     try:
         r = requests.post(SLACK_WEBHOOK, json={"text": message})
-        print(f"Sent: {message[:50]}..., Slack response: {r.status_code}")
+        print(f"Sent Slack message ({len(message)} chars), response: {r.status_code}")
         return True
     except Exception as e:
         print(f"Error sending Slack: {e}")
@@ -80,26 +80,8 @@ def fetch_hadiths():
         print(f"Error fetching hadiths: {e}")
         return []
 
-def get_next_hadith_index(hadith_list):
-    today = date.today().isoformat()
-
-    # Check today's index
-    res = supabase.table("daily_hadith_track").select("*").eq("track_date", today).execute()
-    if res.data and len(res.data) > 0:
-        row = res.data[0]
-        index = row["hadith_index"]
-    else:
-        # Get last index
-        res_last = supabase.table("daily_hadith_track").select("hadith_index").order("track_date", desc=True).limit(1).execute()
-        last_index = res_last.data[0]["hadith_index"] if res_last.data else -1
-        index = (last_index + 1) % len(hadith_list)
-        # Insert today's index
-        supabase.table("daily_hadith_track").insert({"track_date": today, "hadith_index": index}).execute()
-
-    return index
-
 def format_hadith_message(hadith):
-    """Formats Hadith for Slack with all narrators and full text"""
+    """Format Hadith for Slack message."""
     arabic = hadith.get("hadithArabic", "N/A")
     english = hadith.get("hadithEnglish", "N/A")
     urdu = hadith.get("hadithUrdu", "N/A")
@@ -119,31 +101,52 @@ def format_hadith_message(hadith):
     return message
 
 def send_hadith_single_message():
-    """Send a Hadith only if it fits in a single Slack message"""
+    """Send a Hadith only if it fits in one Slack message and update index."""
     hadith_list = fetch_hadiths()
     if not hadith_list:
         return "No Hadith available"
 
     total_hadith = len(hadith_list)
-    start_index = get_next_hadith_index(hadith_list)
+    today = date.today().isoformat()
 
+    # Get today's last index
+    res = supabase.table("daily_hadith_track").select("*").eq("track_date", today).execute()
+    if res.data and len(res.data) > 0:
+        last_index = res.data[0]["hadith_index"]
+    else:
+        # Get last index from previous days
+        res_last = supabase.table("daily_hadith_track").select("hadith_index").order("track_date", desc=True).limit(1).execute()
+        last_index = res_last.data[0]["hadith_index"] if res_last.data else -1
+
+    # Try each Hadith in circular order
     for i in range(total_hadith):
-        index = (start_index + i) % total_hadith
+        index = (last_index + 1 + i) % total_hadith
         hadith = hadith_list[index]
         message = format_hadith_message(hadith)
 
         if len(message) <= SLACK_MAX_LENGTH:
+            # Update index for today
+            if res.data and len(res.data) > 0:
+                supabase.table("daily_hadith_track").update({"hadith_index": index}).eq("track_date", today).execute()
+            else:
+                supabase.table("daily_hadith_track").insert({"track_date": today, "hadith_index": index}).execute()
+
             send_slack_message(message)
-            today = date.today().isoformat()
-            supabase.table("daily_hadith_track").update({"hadith_index": index}).eq("track_date", today).execute()
             return f"Hadith {index} sent successfully"
 
         print(f"Skipped Hadith {index}, too long ({len(message)} chars)")
 
+    # If none fit, move index forward to avoid sending same ones repeatedly
+    next_index = (last_index + 1) % total_hadith
+    if res.data and len(res.data) > 0:
+        supabase.table("daily_hadith_track").update({"hadith_index": next_index}).eq("track_date", today).execute()
+    else:
+        supabase.table("daily_hadith_track").insert({"track_date": today, "hadith_index": next_index}).execute()
+
     return "No Hadith fits in a single message today"
 
 # -------------------------
-# HANDLER
+# HTTP HANDLER
 # -------------------------
 class handler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -154,7 +157,7 @@ class handler(BaseHTTPRequestHandler):
         parsed_path = urlparse(self.path).path
         print(f"[{now.strftime('%Y-%m-%d %H:%M:%S')}] Incoming request path: {self.path}")
 
-        # Test Slack + Hadith
+        # Test Slack
         if parsed_path.endswith("/test-slack"):
             send_slack_message(f"🕌 Test message at {now.strftime('%I:%M %p')}")
             sent_messages.append("Test Slack message sent")
