@@ -26,7 +26,7 @@ TZ = pytz.timezone("Asia/Karachi")
 WINDOW_MINUTES = 5
 LAST_SENT = {}
 
-# Slack chunking
+# Slack chunk size (safe)
 SLACK_CHUNK_SIZE = 3500
 
 # -------------------------
@@ -41,20 +41,51 @@ if not SUPABASE_URL or not SUPABASE_KEY:
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # -------------------------
-# HELPERS
+# SLACK MESSAGE SPLITTER
 # -------------------------
+def split_message_safely(message, max_length):
+    """Split message without breaking words or paragraphs"""
+    chunks = []
+
+    while len(message) > max_length:
+        # Prefer paragraph split
+        split_index = message.rfind("\n", 0, max_length)
+
+        # If no newline, split by space
+        if split_index == -1:
+            split_index = message.rfind(" ", 0, max_length)
+
+        # If still nothing, force split
+        if split_index == -1:
+            split_index = max_length
+
+        chunks.append(message[:split_index])
+        message = message[split_index:].lstrip()
+
+    if message:
+        chunks.append(message)
+
+    return chunks
+
+
 def send_slack_message(message):
-    """Send message safely to Slack with chunking"""
+    """Send message safely to Slack"""
     try:
-        for i in range(0, len(message), SLACK_CHUNK_SIZE):
-            chunk = message[i:i + SLACK_CHUNK_SIZE]
+        chunks = split_message_safely(message, SLACK_CHUNK_SIZE)
+
+        for i, chunk in enumerate(chunks):
             r = requests.post(SLACK_WEBHOOK, json={"text": chunk})
-            print(f"Sent chunk {i//SLACK_CHUNK_SIZE + 1}, status: {r.status_code}")
+            print(f"Sent chunk {i+1}/{len(chunks)} | Status: {r.status_code}")
+
     except Exception as e:
         print(f"Error sending Slack: {e}")
 
+# -------------------------
+# HELPERS
+# -------------------------
 def is_within_range(now, target):
     return target <= now < (target + timedelta(minutes=WINDOW_MINUTES))
+
 
 def round_asar_time(dt):
     minute = dt.minute
@@ -62,6 +93,7 @@ def round_asar_time(dt):
         return dt.replace(minute=30, second=0, microsecond=0)
     else:
         return dt.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+
 
 def get_prayer_times():
     today = datetime.utcnow().strftime("%d-%m-%Y")
@@ -83,6 +115,7 @@ def fetch_hadiths():
     except Exception as e:
         print(f"Error fetching hadiths: {e}")
         return []
+
 
 def get_next_hadith_index(hadith_list):
     today = date.today().isoformat()
@@ -114,12 +147,14 @@ def get_next_hadith_index(hadith_list):
 
     return index
 
+
 def get_daily_hadith():
     hadith_list = fetch_hadiths()
     if not hadith_list:
         return None
     index = get_next_hadith_index(hadith_list)
     return hadith_list[index]
+
 
 def format_hadith_message(hadith):
     arabic = hadith.get("hadithArabic", "N/A")
@@ -158,12 +193,11 @@ class handler(BaseHTTPRequestHandler):
         sent_messages = []
 
         parsed_path = urlparse(self.path).path
-        print(f"[{now}] Path: {self.path}")
 
         # Test endpoint
         if parsed_path.endswith("/test-slack"):
             send_slack_message(f"🕌 Test message at {now.strftime('%I:%M %p')}")
-            sent_messages.append("Test Slack message sent")
+            sent_messages.append("Test message")
             sent_messages.append(send_hadith())
 
         # Prayer times
@@ -182,40 +216,25 @@ class handler(BaseHTTPRequestHandler):
             for name, prayer_time in prayers.items():
                 reminder_time = prayer_time - timedelta(minutes=15)
 
-                prayer_key = f"{name}-{today_str}-prayer"
-                reminder_key = f"{name}-{today_str}-reminder"
-
-                if is_within_range(now, reminder_time) and not LAST_SENT.get(reminder_key):
+                if is_within_range(now, reminder_time):
                     send_slack_message(f"⏰ 15 min left for {name} prayer")
-                    LAST_SENT[reminder_key] = True
-                    sent_messages.append(f"{name} reminder")
 
-                if is_within_range(now, prayer_time) and not LAST_SENT.get(prayer_key):
+                if is_within_range(now, prayer_time):
                     send_slack_message(f"🕌 Time for {name} prayer!")
-                    LAST_SENT[prayer_key] = True
-                    sent_messages.append(f"{name} prayer")
 
         # Daily Hadith at 10 AM
-        hadith_key = f"hadith-{today_str}"
         hadith_time = now.replace(hour=10, minute=0)
-
-        if is_within_range(now, hadith_time) and not LAST_SENT.get(hadith_key):
+        if is_within_range(now, hadith_time):
             sent_messages.append(send_hadith())
-            LAST_SENT[hadith_key] = True
 
         # Response
         self.send_response(200)
-        self.send_header("Content-type", "text/plain")
         self.end_headers()
-
-        response = f"Sent: {', '.join(sent_messages)}" if sent_messages else "No match"
-        print(response)
-        self.wfile.write(response.encode("utf-8"))
+        self.wfile.write(b"OK")
 
 # -------------------------
 # SERVER ENTRY
 # -------------------------
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
-    print(f"Server running on port {port}")
     HTTPServer(("", port), handler).serve_forever()
