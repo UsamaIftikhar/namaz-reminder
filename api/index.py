@@ -24,7 +24,7 @@ TZ = pytz.timezone("Asia/Karachi")
 WINDOW_MINUTES = 5
 LAST_SENT = {}
 
-SLACK_MAX_LENGTH = 38000  # safe buffer below Slack limit
+SLACK_MAX_LENGTH = 3800  # chunking buffer for long messages
 
 # -------------------------
 # SUPABASE CLIENT
@@ -40,13 +40,28 @@ supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 # HELPERS
 # -------------------------
 def send_slack_message(message):
-    try:
-        r = requests.post(SLACK_WEBHOOK, json={"text": message})
-        print(f"Sent: {message[:50]}..., Slack response: {r.status_code}")
+    """Send message to Slack, supports long messages by splitting."""
+    if len(message) <= SLACK_MAX_LENGTH:
+        try:
+            r = requests.post(SLACK_WEBHOOK, json={"text": message})
+            print(f"Sent: {message[:50]}..., Slack response: {r.status_code}")
+            return True
+        except Exception as e:
+            print(f"Error sending Slack: {e}")
+            return False
+    else:
+        # split into chunks
+        lines = message.split("\n")
+        chunk = ""
+        for line in lines:
+            if len(chunk) + len(line) + 1 > SLACK_MAX_LENGTH:
+                send_slack_message(chunk)
+                chunk = line + "\n"
+            else:
+                chunk += line + "\n"
+        if chunk:
+            send_slack_message(chunk)
         return True
-    except Exception as e:
-        print(f"Error sending Slack: {e}")
-        return False
 
 def is_within_range(now, target):
     return target <= now < (target + timedelta(minutes=WINDOW_MINUTES))
@@ -74,7 +89,7 @@ def get_prayer_times():
 def fetch_hadiths():
     try:
         data = requests.get(HADITH_API_URL).json()
-        return data["hadiths"]["data"]
+        return data.get("hadiths", {}).get("data", [])
     except Exception as e:
         print(f"Error fetching hadiths: {e}")
         return []
@@ -82,12 +97,11 @@ def fetch_hadiths():
 def get_next_hadith_index(hadith_list):
     today = date.today().isoformat()
 
-    # Check if today's entry exists
+    # Check today's index
     res = supabase.table("daily_hadith_track").select("*").eq("track_date", today).execute()
     if res.data and len(res.data) > 0:
         row = res.data[0]
         index = row["hadith_index"]
-        # Increment index for next send
         new_index = (index + 1) % len(hadith_list)
         supabase.table("daily_hadith_track").update({"hadith_index": new_index}).eq("track_date", today).execute()
     else:
@@ -95,7 +109,6 @@ def get_next_hadith_index(hadith_list):
         res_last = supabase.table("daily_hadith_track").select("hadith_index").order("track_date", desc=True).limit(1).execute()
         last_index = res_last.data[0]["hadith_index"] if res_last.data else -1
         index = (last_index + 1) % len(hadith_list)
-        # Insert today's index
         supabase.table("daily_hadith_track").insert({"track_date": today, "hadith_index": index}).execute()
 
     return index
@@ -107,35 +120,33 @@ def get_daily_hadith():
     index = get_next_hadith_index(hadith_list)
     return hadith_list[index]
 
+def format_hadith_message(hadith):
+    """Formats Hadith for Slack with all narrators and full text"""
+    arabic = hadith.get("hadithArabic", "N/A")
+    english = hadith.get("hadithEnglish", "N/A")
+    urdu = hadith.get("hadithUrdu", "N/A")
+    eng_narrator = hadith.get("englishNarrator", "Unknown")
+    urdu_narrator = hadith.get("urduNarrator", "N/A")
+    hadith_number = hadith.get("hadithNumber", "N/A")
+    chapter = hadith.get("headingEnglish", "N/A")
+
+    message = (
+        f":crescent_moon: *Daily Hadith Reminder* :crescent_moon:\n\n"
+        f"*Arabic:*\n{arabic}\n\n"
+        f"*English:*\n{english}\n\n"
+        f"*Urdu:*\n{urdu}\n\n"
+        f"— Narrated by: {eng_narrator} / {urdu_narrator}\n\n"
+        f":book: Source: Sahih Bukhari, Hadith Number: {hadith_number}, Chapter: {chapter}"
+    )
+    return message
+
 def send_hadith():
     hadith = get_daily_hadith()
     if not hadith:
         return "No Hadith available"
 
-    base_message = (
-        f":crescent_moon: *Daily Hadith Reminder* :crescent_moon:\n\n"
-        f"*Arabic:* \n{hadith['hadithArabic']}\n\n"
-        f"*English:* \n{hadith['hadithEnglish']}\n\n"
-        f"*Urdu:* \n{hadith.get('hadithUrdu', 'N/A')}\n\n"
-        f"— Narrated by: {hadith['englishNarrator']} \n {hadith.get('urduNarrator', 'N/A')}\n\n"
-        f":book: Source: Sahih Bukhari, Hadith Number: {hadith.get('hadithNumber', 'N/A')}, Chapter: {hadith['headingEnglish']}"
-    )
-
-    # Handle long messages
-    if len(base_message) > SLACK_MAX_LENGTH:
-        lines = base_message.split("\n")
-        chunk = ""
-        for line in lines:
-            if len(chunk) + len(line) + 1 > SLACK_MAX_LENGTH:
-                send_slack_message(chunk)
-                chunk = line + "\n"
-            else:
-                chunk += line + "\n"
-        if chunk:
-            send_slack_message(chunk)
-    else:
-        send_slack_message(base_message)
-
+    message = format_hadith_message(hadith)
+    send_slack_message(message)
     return "Hadith sent"
 
 # -------------------------
@@ -150,7 +161,7 @@ class handler(BaseHTTPRequestHandler):
         parsed_path = urlparse(self.path).path
         print(f"[{now.strftime('%Y-%m-%d %H:%M:%S')}] Incoming request path: {self.path}")
 
-        # Test Slack + insert hadith
+        # Test Slack + Hadith
         if parsed_path.endswith("/test-slack"):
             send_slack_message(f"🕌 Test message at {now.strftime('%I:%M %p')}")
             sent_messages.append("Test Slack message sent")
