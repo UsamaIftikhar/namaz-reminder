@@ -83,16 +83,17 @@ def get_next_hadith_index(hadith_list):
 
     # Check if today's entry exists
     res = supabase.table("daily_hadith_track").select("hadith_index").eq("track_date", today).execute()
+    
     if res.data and len(res.data) > 0:
-        index = res.data[0]["hadith_index"]
+        # Record exists → increment index
+        current_index = res.data[0]["hadith_index"]
+        next_index = (current_index + 1) % len(hadith_list)
+        supabase.table("daily_hadith_track").update({"hadith_index": next_index}).eq("track_date", today).execute()
+        return next_index
     else:
-        # Get last index
-        res_last = supabase.table("daily_hadith_track").select("hadith_index").order("track_date", desc=True).limit(1).execute()
-        last_index = res_last.data[0]["hadith_index"] if res_last.data else -1
-        index = (last_index + 1) % len(hadith_list)
-        # Insert today's index
-        supabase.table("daily_hadith_track").insert({"track_date": today, "hadith_index": index}).execute()
-    return index
+        # No record today → insert first Hadith
+        supabase.table("daily_hadith_track").insert({"track_date": today, "hadith_index": 0}).execute()
+        return 0
 
 def get_daily_hadith():
     hadith_list = fetch_hadiths()
