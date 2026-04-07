@@ -23,6 +23,8 @@ CITY_LON = float(os.getenv("CITY_LON", "74.2782463"))
 TZ = pytz.timezone("Asia/Karachi")
 
 HADITH_TRACK_TABLE = os.getenv("HADITH_TRACK_TABLE", "daily_hadith_track")
+NOTIFICATION_LOCK_TABLE = os.getenv("NOTIFICATION_LOCK_TABLE", "daily_notification_lock")
+NOTIFICATION_LOCK_RETENTION_DAYS = int(os.getenv("NOTIFICATION_LOCK_RETENTION_DAYS", "30"))
 
 
 def _build_channels():
@@ -79,6 +81,88 @@ def all_hadith_webhooks():
 
 def is_within_range(now, target):
     return target <= now < (target + timedelta(minutes=WINDOW_MINUTES))
+
+
+def notification_already_sent(notification_key):
+    """Check DB lock table first; fallback to in-memory state."""
+    if LAST_SENT.get(notification_key):
+        return True
+    try:
+        res = (
+            supabase.table(NOTIFICATION_LOCK_TABLE)
+            .select("notify_key")
+            .eq("notify_key", notification_key)
+            .limit(1)
+            .execute()
+        )
+        return bool(res.data)
+    except Exception as e:
+        # If table isn't available yet, continue with in-memory dedupe.
+        print(f"Notification lock read failed, using memory dedupe: {e}")
+        return bool(LAST_SENT.get(notification_key))
+
+
+def lock_notification(notification_key):
+    """Create DB lock for this notification key."""
+    try:
+        supabase.table(NOTIFICATION_LOCK_TABLE).insert(
+            {"notify_key": notification_key, "track_date": date.today().isoformat()}
+        ).execute()
+        return True
+    except Exception as e:
+        print(f"Notification lock insert failed: {e}")
+        return False
+
+
+def unlock_notification(notification_key):
+    """Release DB lock if send fails, allowing a later retry."""
+    try:
+        supabase.table(NOTIFICATION_LOCK_TABLE).delete().eq("notify_key", notification_key).execute()
+    except Exception as e:
+        print(f"Notification unlock failed: {e}")
+
+
+def send_once(notification_key, message, webhook_url):
+    """
+    Cross-instance dedupe:
+    1) check existing lock
+    2) acquire lock
+    3) send
+    4) release lock on failure
+    """
+    if notification_already_sent(notification_key):
+        return False
+
+    if not lock_notification(notification_key):
+        # Fallback behavior if lock table missing/unavailable.
+        if LAST_SENT.get(notification_key):
+            return False
+        if send_slack_message(message, webhook_url=webhook_url):
+            LAST_SENT[notification_key] = True
+            return True
+        return False
+
+    if send_slack_message(message, webhook_url=webhook_url):
+        LAST_SENT[notification_key] = True
+        return True
+
+    unlock_notification(notification_key)
+    return False
+
+
+def cleanup_old_notification_locks(now):
+    """Delete old lock rows once per day."""
+    cleanup_key = f"lock-cleanup-{now.strftime('%Y-%m-%d')}"
+    if LAST_SENT.get(cleanup_key):
+        return
+
+    cutoff_date = (now.date() - timedelta(days=NOTIFICATION_LOCK_RETENTION_DAYS)).isoformat()
+    try:
+        supabase.table(NOTIFICATION_LOCK_TABLE).delete().lt("track_date", cutoff_date).execute()
+        LAST_SENT[cleanup_key] = True
+        print(f"Notification lock cleanup done. Removed rows older than {cutoff_date}")
+    except Exception as e:
+        print(f"Notification lock cleanup failed: {e}")
 
 def round_asar_time(dt):
     minute = dt.minute
@@ -183,6 +267,7 @@ class handler(BaseHTTPRequestHandler):
         now = datetime.now(TZ).replace(second=0, microsecond=0)
         today_str = now.strftime("%Y-%m-%d")
         sent_messages = []
+        cleanup_old_notification_locks(now)
 
         parsed_path = urlparse(self.path).path
         print(f"[{now.strftime('%Y-%m-%d %H:%M:%S')}] Incoming request path: {self.path}")
@@ -233,20 +318,20 @@ class handler(BaseHTTPRequestHandler):
                     prayer_key = f"{cid}-{name}-{today_str}-prayer"
                     reminder_key = f"{cid}-{name}-{today_str}-reminder"
 
-                    if is_within_range(now, reminder_time) and not LAST_SENT.get(reminder_key):
-                        if send_slack_message(
+                    if is_within_range(now, reminder_time):
+                        if send_once(
+                            reminder_key,
                             f"⏰ 15 min left for {name} prayer",
                             webhook_url=ch["webhook"],
                         ):
-                            LAST_SENT[reminder_key] = True
                             sent_messages.append(f"ch{cid} {name} reminder sent")
 
-                    if is_within_range(now, prayer_time) and not LAST_SENT.get(prayer_key):
-                        if send_slack_message(
+                    if is_within_range(now, prayer_time):
+                        if send_once(
+                            prayer_key,
                             f"🕌 Time for {name} prayer!",
                             webhook_url=ch["webhook"],
                         ):
-                            LAST_SENT[prayer_key] = True
                             sent_messages.append(f"ch{cid} {name} prayer sent")
 
         # Daily Hadith at 10 AM
