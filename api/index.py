@@ -5,7 +5,6 @@ from datetime import datetime, timedelta, date
 import pytz
 from urllib.parse import urlparse
 from supabase import create_client
-import json
 
 # -------------------------
 # CONFIG
@@ -14,12 +13,35 @@ SLACK_WEBHOOK = os.getenv("SLACK_WEBHOOK")
 if not SLACK_WEBHOOK:
     raise ValueError("SLACK_WEBHOOK not set!")
 
+SLACK_WEBHOOK_2 = os.getenv("SLACK_WEBHOOK_2")
+
 HADITH_API_KEY = os.getenv("HADITH_API_KEY")
 HADITH_API_URL = f"https://hadithapi.com/api/hadiths?apiKey={HADITH_API_KEY}&book=sahih-bukhari"
 
-CITY_LAT = 31.4313584
-CITY_LON = 74.2782463
+CITY_LAT = float(os.getenv("CITY_LAT", "31.4313584"))
+CITY_LON = float(os.getenv("CITY_LON", "74.2782463"))
 TZ = pytz.timezone("Asia/Karachi")
+
+HADITH_TRACK_TABLE = os.getenv("HADITH_TRACK_TABLE", "daily_hadith_track")
+
+
+def _build_channels():
+    """Channel 1 (boys) + optional channel 2 (girls)."""
+    channels = [
+        {"id": "1", "label": "boys", "webhook": SLACK_WEBHOOK},
+    ]
+    if SLACK_WEBHOOK_2:
+        channels.append(
+            {
+                "id": "2",
+                "label": "girls",
+                "webhook": SLACK_WEBHOOK_2,
+            }
+        )
+    return channels
+
+
+CHANNELS = _build_channels()
 
 WINDOW_MINUTES = 5
 LAST_SENT = {}
@@ -39,15 +61,21 @@ supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 # -------------------------
 # HELPERS
 # -------------------------
-def send_slack_message(message):
-    """Send message to Slack if within limit."""
+def send_slack_message(message, webhook_url=None):
+    """Send message to a Slack incoming webhook (defaults to primary)."""
+    url = webhook_url or SLACK_WEBHOOK
     try:
-        r = requests.post(SLACK_WEBHOOK, json={"text": message})
+        r = requests.post(url, json={"text": message})
         print(f"Sent Slack message ({len(message)} chars), response: {r.status_code}")
         return True
     except Exception as e:
         print(f"Error sending Slack: {e}")
         return False
+
+
+def all_hadith_webhooks():
+    """Same hadith goes to every configured channel."""
+    return [c["webhook"] for c in CHANNELS]
 
 def is_within_range(now, target):
     return target <= now < (target + timedelta(minutes=WINDOW_MINUTES))
@@ -59,9 +87,9 @@ def round_asar_time(dt):
     else:
         return dt.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
 
-def get_prayer_times():
+def get_prayer_times(lat, lon):
     today = datetime.utcnow().strftime("%d-%m-%Y")
-    url = f"https://api.aladhan.com/v1/timings/{today}?latitude={CITY_LAT}&longitude={CITY_LON}&method=3"
+    url = f"https://api.aladhan.com/v1/timings/{today}?latitude={lat}&longitude={lon}&method=3"
     try:
         data = requests.get(url).json()
         return data["data"]["timings"]
@@ -110,12 +138,12 @@ def send_hadith_single_message():
     today = date.today().isoformat()
 
     # Get today's last index
-    res = supabase.table("daily_hadith_track").select("*").eq("track_date", today).execute()
+    res = supabase.table(HADITH_TRACK_TABLE).select("*").eq("track_date", today).execute()
     if res.data and len(res.data) > 0:
         last_index = res.data[0]["hadith_index"]
     else:
         # Get last index from previous days
-        res_last = supabase.table("daily_hadith_track").select("hadith_index").order("track_date", desc=True).limit(1).execute()
+        res_last = supabase.table(HADITH_TRACK_TABLE).select("hadith_index").order("track_date", desc=True).limit(1).execute()
         last_index = res_last.data[0]["hadith_index"] if res_last.data else -1
 
     # Try each Hadith in circular order
@@ -127,21 +155,23 @@ def send_hadith_single_message():
         if len(message) <= SLACK_MAX_LENGTH:
             # Update index for today
             if res.data and len(res.data) > 0:
-                supabase.table("daily_hadith_track").update({"hadith_index": index}).eq("track_date", today).execute()
+                supabase.table(HADITH_TRACK_TABLE).update({"hadith_index": index}).eq("track_date", today).execute()
             else:
-                supabase.table("daily_hadith_track").insert({"track_date": today, "hadith_index": index}).execute()
+                supabase.table(HADITH_TRACK_TABLE).insert({"track_date": today, "hadith_index": index}).execute()
 
-            send_slack_message(message)
-            return f"Hadith {index} sent successfully"
+            webhooks = all_hadith_webhooks()
+            for wh in webhooks:
+                send_slack_message(message, webhook_url=wh)
+            return f"Hadith {index} sent to {len(webhooks)} channel(s)"
 
         print(f"Skipped Hadith {index}, too long ({len(message)} chars)")
 
     # If none fit, move index forward to avoid sending same ones repeatedly
     next_index = (last_index + 1) % total_hadith
     if res.data and len(res.data) > 0:
-        supabase.table("daily_hadith_track").update({"hadith_index": next_index}).eq("track_date", today).execute()
+        supabase.table(HADITH_TRACK_TABLE).update({"hadith_index": next_index}).eq("track_date", today).execute()
     else:
-        supabase.table("daily_hadith_track").insert({"track_date": today, "hadith_index": next_index}).execute()
+        supabase.table(HADITH_TRACK_TABLE).insert({"track_date": today, "hadith_index": next_index}).execute()
 
     return "No Hadith fits in a single message today"
 
@@ -159,37 +189,65 @@ class handler(BaseHTTPRequestHandler):
 
         # Test Slack
         if parsed_path.endswith("/test-slack"):
-            send_slack_message(f"🕌 Test message at {now.strftime('%I:%M %p')}")
-            sent_messages.append("Test Slack message sent")
+            for ch in CHANNELS:
+                send_slack_message(
+                    f"🕌 Test message ({ch['label']}) at {now.strftime('%I:%M %p')}",
+                    webhook_url=ch["webhook"],
+                )
+            sent_messages.append("Test Slack message sent (all channels)")
             msg = send_hadith_single_message()
             sent_messages.append(msg)
 
-        # Prayer times
-        timings = get_prayer_times()
-        if timings:
-            zohar_time = now.replace(hour=13, minute=40)
-            asr_api = datetime.strptime(timings.get("Asr", "17:00"), "%H:%M")
-            asar_time = now.replace(hour=asr_api.hour, minute=asr_api.minute)
-            asar_time = round_asar_time(asar_time) + timedelta(minutes=45)
-            maghrib_api = datetime.strptime(timings.get("Maghrib", "18:30"), "%H:%M")
-            maghrib_time = now.replace(hour=maghrib_api.hour, minute=maghrib_api.minute) + timedelta(minutes=5)
+        # Prayer times: same location for both channels, but custom per-channel business rules.
+        base_timings = get_prayer_times(CITY_LAT, CITY_LON)
+        if base_timings:
+            asr_api = datetime.strptime(base_timings.get("Asr", "17:00"), "%H:%M")
+            boys_asar = now.replace(hour=asr_api.hour, minute=asr_api.minute)
+            boys_asar = round_asar_time(boys_asar) + timedelta(minutes=45)
 
-            prayers = {"Zohar": zohar_time, "Asar": asar_time, "Maghrib": maghrib_time}
+            maghrib_api = datetime.strptime(base_timings.get("Maghrib", "18:30"), "%H:%M")
+            maghrib_base = now.replace(hour=maghrib_api.hour, minute=maghrib_api.minute)
 
-            for name, prayer_time in prayers.items():
-                reminder_time = prayer_time - timedelta(minutes=15)
-                prayer_key = f"{name}-{today_str}-prayer"
-                reminder_key = f"{name}-{today_str}-reminder"
+            channel_prayers = {
+                "1": {  # Boys
+                    "Zohar": now.replace(hour=13, minute=40),
+                    "Asar": boys_asar,
+                    # Boys: reminder should occur at api+10 with "15 min left",
+                    # so prayer time is api+25.
+                    "Maghrib": maghrib_base + timedelta(minutes=25),
+                }
+            }
+            if SLACK_WEBHOOK_2:
+                channel_prayers["2"] = {  # Girls
+                    "Zohar": now.replace(hour=14, minute=5),
+                    "Asar": boys_asar + timedelta(minutes=30),
+                    # Girls: maghrib on API time.
+                    "Maghrib": maghrib_base,
+                }
 
-                if is_within_range(now, reminder_time) and not LAST_SENT.get(reminder_key):
-                    if send_slack_message(f"⏰ 15 min left for {name} prayer"):
-                        LAST_SENT[reminder_key] = True
-                        sent_messages.append(f"{name} reminder sent")
+            for ch in CHANNELS:
+                cid = ch["id"]
+                prayers = channel_prayers.get(cid, channel_prayers["1"])
+                for name, prayer_time in prayers.items():
+                    reminder_time = prayer_time - timedelta(minutes=15)
+                    prayer_key = f"{cid}-{name}-{today_str}-prayer"
+                    reminder_key = f"{cid}-{name}-{today_str}-reminder"
 
-                if is_within_range(now, prayer_time) and not LAST_SENT.get(prayer_key):
-                    if send_slack_message(f"🕌 Time for {name} prayer!"):
-                        LAST_SENT[prayer_key] = True
-                        sent_messages.append(f"{name} prayer sent")
+                    if is_within_range(now, reminder_time) and not LAST_SENT.get(reminder_key):
+                        if send_slack_message(
+                            f"⏰ 15 min left for {name} prayer",
+                            webhook_url=ch["webhook"],
+                        ):
+                            LAST_SENT[reminder_key] = True
+                            sent_messages.append(f"ch{cid} {name} reminder sent")
+
+                    if is_within_range(now, prayer_time) and not LAST_SENT.get(prayer_key):
+                        if send_slack_message(
+                            f"🕌 Time for {name} prayer!",
+                            webhook_url=ch["webhook"],
+                        ):
+                            LAST_SENT[prayer_key] = True
+                            sent_messages.append(f"ch{cid} {name} prayer sent")
 
         # Daily Hadith at 10 AM
         hadith_key = f"hadith-{today_str}"
