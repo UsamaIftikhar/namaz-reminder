@@ -297,9 +297,9 @@ class handler(BaseHTTPRequestHandler):
                 "1": {  # Boys
                     "Zohar": now.replace(hour=13, minute=40),
                     "Asar": boys_asar,
-                    # Boys: reminder should occur at api+10 with "15 min left",
-                    # so prayer time is api+25.
-                    "Maghrib": maghrib_base + timedelta(minutes=25),
+                    # Boys: reminder should occur at api-5 with "15 min left",
+                    # so prayer time is api+10.
+                    "Maghrib": maghrib_base + timedelta(minutes=10),
                 }
             }
             if SLACK_WEBHOOK_2:
