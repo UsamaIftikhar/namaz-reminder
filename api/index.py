@@ -265,6 +265,15 @@ def send_hadith_single_message():
 class handler(BaseHTTPRequestHandler):
     def do_GET(self):
         now = datetime.now(TZ).replace(second=0, microsecond=0)
+        if now.weekday() >= 5:  # 5=Saturday, 6=Sunday
+            self.send_response(200)
+            self.send_header("Content-type", "text/plain")
+            self.end_headers()
+            response_text = "Weekend skip: no notifications"
+            print(f"Response: {response_text}")
+            self.wfile.write(response_text.encode("utf-8"))
+            return
+
         today_str = now.strftime("%Y-%m-%d")
         sent_messages = []
         cleanup_old_notification_locks(now)
