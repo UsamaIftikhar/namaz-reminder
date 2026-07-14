@@ -16,7 +16,10 @@ if not SLACK_WEBHOOK:
 SLACK_WEBHOOK_2 = os.getenv("SLACK_WEBHOOK_2")
 
 HADITH_API_KEY = os.getenv("HADITH_API_KEY")
-HADITH_API_URL = f"https://hadithapi.com/api/hadiths?apiKey={HADITH_API_KEY}&book=sahih-bukhari"
+HADITH_API_URL = "https://hadithapi.com/api/hadiths"
+HADITH_BOOK = "sahih-bukhari"
+HADITH_PAGE_SIZE = 200  # API maximum; reduces requests while covering the full book.
+LEGACY_HADITH_PAGE_SIZE = 25  # Old code only ever loaded the API's default first page.
 
 CITY_LAT = float(os.getenv("CITY_LAT", "31.4313584"))
 CITY_LON = float(os.getenv("CITY_LON", "74.2782463"))
@@ -184,13 +187,23 @@ def get_prayer_times(lat, lon):
 # -------------------------
 # HADITH LOGIC
 # -------------------------
-def fetch_hadiths():
+def fetch_hadith_page(page):
     try:
-        data = requests.get(HADITH_API_URL).json()
-        return data.get("hadiths", {}).get("data", [])
+        response = requests.get(
+            HADITH_API_URL,
+            params={
+                "apiKey": HADITH_API_KEY,
+                "book": HADITH_BOOK,
+                "paginate": HADITH_PAGE_SIZE,
+                "page": page,
+            },
+            timeout=20,
+        )
+        response.raise_for_status()
+        return response.json().get("hadiths", {})
     except Exception as e:
-        print(f"Error fetching hadiths: {e}")
-        return []
+        print(f"Error fetching Hadith page {page}: {e}")
+        return {}
 
 def format_hadith_message(hadith):
     """Format Hadith for Slack message."""
@@ -212,52 +225,103 @@ def format_hadith_message(hadith):
     )
     return message
 
-def send_hadith_single_message():
-    """Send a Hadith only if it fits in one Slack message and update index."""
-    hadith_list = fetch_hadiths()
-    if not hadith_list:
-        return "No Hadith available"
+def next_hadith_sequence(last_sequence, legacy_page_completed=False):
+    """Return the next monotonic sequence value, migrating the old 25-item cycle."""
+    if last_sequence is None:
+        return 0
+    if legacy_page_completed and last_sequence < LEGACY_HADITH_PAGE_SIZE:
+        # Legacy values 0-24 only identify an item on API page 1. That page has
+        # already cycled in production, so continue from Hadith 26.
+        return LEGACY_HADITH_PAGE_SIZE
+    return last_sequence + 1
 
-    total_hadith = len(hadith_list)
-    today = date.today().isoformat()
 
-    # Get today's last index
-    res = supabase.table(HADITH_TRACK_TABLE).select("*").eq("track_date", today).execute()
-    if res.data and len(res.data) > 0:
-        last_index = res.data[0]["hadith_index"]
-    else:
-        # Get last index from previous days
-        res_last = supabase.table(HADITH_TRACK_TABLE).select("hadith_index").order("track_date", desc=True).limit(1).execute()
-        last_index = res_last.data[0]["hadith_index"] if res_last.data else -1
+def find_next_fitting_hadith(last_sequence, legacy_page_completed=False):
+    """Find the next Slack-sized Hadith across every API page."""
+    first_page = fetch_hadith_page(1)
+    hadiths = first_page.get("data", [])
+    total_hadith = int(first_page.get("total") or len(hadiths))
+    per_page = int(first_page.get("per_page") or HADITH_PAGE_SIZE)
+    if not hadiths or total_hadith <= 0:
+        return None
 
-    # Try each Hadith in circular order
-    for i in range(total_hadith):
-        index = (last_index + 1 + i) % total_hadith
-        hadith = hadith_list[index]
+    page_cache = {1: first_page}
+    sequence = next_hadith_sequence(last_sequence, legacy_page_completed)
+
+    # A monotonic sequence is persisted. Modulo is used only to start over after
+    # the complete book has been exhausted, never after a single API page.
+    for _ in range(total_hadith):
+        position = sequence % total_hadith
+        page_number = (position // per_page) + 1
+        page_data = page_cache.get(page_number)
+        if page_data is None:
+            page_data = fetch_hadith_page(page_number)
+            if not page_data.get("data"):
+                return None
+            page_cache[page_number] = page_data
+
+        page_start = int(page_data.get("from") or ((page_number - 1) * per_page + 1)) - 1
+        page_offset = position - page_start
+        page_hadiths = page_data.get("data", [])
+        if page_offset < 0 or page_offset >= len(page_hadiths):
+            print(f"Hadith position {position} missing from API page {page_number}")
+            return None
+
+        hadith = page_hadiths[page_offset]
         message = format_hadith_message(hadith)
-
         if len(message) <= SLACK_MAX_LENGTH:
-            # Update index for today
-            if res.data and len(res.data) > 0:
-                supabase.table(HADITH_TRACK_TABLE).update({"hadith_index": index}).eq("track_date", today).execute()
-            else:
-                supabase.table(HADITH_TRACK_TABLE).insert({"track_date": today, "hadith_index": index}).execute()
+            return sequence, hadith, message
 
-            webhooks = all_hadith_webhooks()
-            for wh in webhooks:
-                send_slack_message(message, webhook_url=wh)
-            return f"Hadith {index} sent to {len(webhooks)} channel(s)"
+        print(
+            f"Skipped Hadith {hadith.get('hadithNumber', position + 1)}, "
+            f"too long ({len(message)} chars)"
+        )
+        sequence += 1
 
-        print(f"Skipped Hadith {index}, too long ({len(message)} chars)")
+    return None
 
-    # If none fit, move index forward to avoid sending same ones repeatedly
-    next_index = (last_index + 1) % total_hadith
-    if res.data and len(res.data) > 0:
-        supabase.table(HADITH_TRACK_TABLE).update({"hadith_index": next_index}).eq("track_date", today).execute()
-    else:
-        supabase.table(HADITH_TRACK_TABLE).insert({"track_date": today, "hadith_index": next_index}).execute()
 
-    return "No Hadith fits in a single message today"
+def send_hadith_single_message():
+    """Send at most one new Hadith per Karachi calendar day."""
+    today = datetime.now(TZ).date().isoformat()
+
+    today_result = (
+        supabase.table(HADITH_TRACK_TABLE)
+        .select("hadith_index")
+        .eq("track_date", today)
+        .limit(1)
+        .execute()
+    )
+    if today_result.data:
+        return "Hadith already sent today"
+
+    previous_result = (
+        supabase.table(HADITH_TRACK_TABLE)
+        .select("hadith_index")
+        .order("track_date", desc=True)
+        .limit(LEGACY_HADITH_PAGE_SIZE + 1)
+        .execute()
+    )
+    last_sequence = previous_result.data[0]["hadith_index"] if previous_result.data else None
+    legacy_page_completed = any(
+        row["hadith_index"] == LEGACY_HADITH_PAGE_SIZE - 1
+        for row in (previous_result.data or [])
+    )
+    selected = find_next_fitting_hadith(last_sequence, legacy_page_completed)
+    if selected is None:
+        return "No Hadith fits in a single message today"
+
+    sequence, hadith, message = selected
+    supabase.table(HADITH_TRACK_TABLE).insert(
+        {"track_date": today, "hadith_index": sequence}
+    ).execute()
+
+    webhooks = all_hadith_webhooks()
+    for webhook in webhooks:
+        send_slack_message(message, webhook_url=webhook)
+
+    hadith_number = hadith.get("hadithNumber", sequence + 1)
+    return f"Hadith {hadith_number} sent to {len(webhooks)} channel(s)"
 
 # -------------------------
 # HTTP HANDLER
